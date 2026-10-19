@@ -1,0 +1,31 @@
+dependencies { api 'com.google.code.gson:gson:2.11.0' }
+// Executable protocol checks run through verifyProtocol, without a test framework.
+tasks.named('test') { enabled = false }
+tasks.withType(JavaCompile).configureEach { options.release = 17 }
+// Test fixtures may use the current JDK; the distributable core is verified separately on Java 17.
+tasks.named('compileTestJava') { options.release = 21 }
+jar { from(rootProject.file('LICENSE')) }
+def generatedVersion = layout.buildDirectory.dir('generated/sources/version')
+tasks.register('generateVersion') {
+    inputs.property('releaseVersion', provider { project.version.toString() })
+    outputs.dir(generatedVersion)
+    doLast {
+        String value = project.version.toString()
+        if (!(value ==~ /[0-9][0-9A-Za-z.+-]{0,63}/)) throw new GradleException('Invalid release version')
+        def target = generatedVersion.get().file('dev/eyecrasher/everywhere/core/BuildVersion.java').asFile
+        target.parentFile.mkdirs()
+        target.text = 'package dev.eyecrasher.everywhere.core;\n' +
+                'public final class BuildVersion {\n' +
+                '    public static final String VERSION = "' + value + '";\n' +
+                '    private BuildVersion() {}\n' +
+                '}\n'
+    }
+}
+sourceSets.main.java.srcDir(tasks.named('generateVersion'))
+compileJava.dependsOn generateVersion
+tasks.register('verifyProtocol', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.core.ProtocolTest'
+}
+check.dependsOn verifyProtocol

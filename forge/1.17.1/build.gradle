@@ -1,0 +1,210 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+plugins {
+    id 'java-library'
+    id 'net.minecraftforge.gradle' version '6.0.54'
+    id 'org.spongepowered.mixin' version '0.7.38'
+    id 'com.gradleup.shadow' version '8.3.11'
+}
+allprojects {
+    group = 'dev.eyecrasher.everywhere'
+    version = '1.0.0-beta.1'
+    repositories { mavenCentral() }
+}
+// Public, deterministic build inputs only. No paths, timestamps or environment
+// from the build machine enter the distributable provenance record.
+def releaseInputs = files(
+        'build.gradle', 'settings.gradle', 'gradle.properties', 'gradlew', 'gradlew.bat',
+        'gradle/wrapper/gradle-wrapper.jar', 'gradle/wrapper/gradle-wrapper.properties',
+        'core/build.gradle', 'relay/build.gradle',
+        'LICENSE', 'licenses/NOTICE.md', 'artwork/icon.png',
+        fileTree('licenses') { include '*.txt' },
+        fileTree('core/src/main'), fileTree('src/main'), fileTree('relay/src/main'))
+def buildInfo = layout.buildDirectory.file('generated/release/build.json')
+tasks.register('writeBuildInfo') {
+    inputs.files(releaseInputs).withPropertyName('releaseInputs').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.property('releaseVersion', provider { project.version.toString() })
+    outputs.file(buildInfo)
+    doLast {
+        def hashes = new TreeMap<String, String>()
+        releaseInputs.files.each { input ->
+            if (java.nio.file.Files.isSymbolicLink(input.toPath()))
+                throw new GradleException('Release input must be a regular file: ' + relativePath(input))
+            hashes.put(relativePath(input).replace('\\', '/'), MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString())
+        }
+        def target = buildInfo.get().asFile
+        target.parentFile.mkdirs()
+        target.text = JsonOutput.toJson([schema: 1, version: project.version.toString(), files: hashes]) + '\n'
+    }
+}
+allprojects {
+    apply plugin: 'java-library'
+    java {
+        toolchain.languageVersion = JavaLanguageVersion.of(21)
+        withSourcesJar()
+    }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+    tasks.withType(Jar).configureEach {
+        dependsOn rootProject.tasks.named('writeBuildInfo')
+        if (project.name != 'core') from(buildInfo) { into 'META-INF/plasmo-everywhere' }
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+}
+
+base { archivesName = 'plasmo-everywhere-forge' }
+tasks.withType(Jar).configureEach { archiveVersion = project.version.toString() + '+1.17.1' }
+repositories { maven { url = 'https://api.modrinth.com/maven' } }
+configurations {
+    shade
+    implementation.extendsFrom(shade)
+}
+minecraft {
+    mappings channel: 'official', version: '1.17.1'
+    runs {
+        client {
+            workingDirectory project.file('run/client')
+            args '--username', 'EverywhereForgeTest', '--width', '960', '--height', '540'
+            property 'mixin.debug.export', 'true'
+            mods { plasmo_everywhere { source sourceSets.main; source project(':core').sourceSets.main } }
+        }
+    }
+}
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.17.1-37.1.1'
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    compileOnly fg.deobf('maven.modrinth:plasmo-voice:bHsbPNxp')
+    shade project(':core')
+}
+tasks.withType(JavaCompile).matching { it.name in ['compileJava','compileTestJava','compileSmokeJava'] }.configureEach { options.release = 17 }
+jar {
+    archiveClassifier = 'thin'
+    from(rootProject.file('LICENSE'))
+    from(rootProject.file('licenses/NOTICE.md'))
+    manifest { attributes 'MixinConfigs': 'plasmo_everywhere.mixins.json' }
+}
+shadowJar {
+    from(rootProject.file('licenses')) {
+        include '*.txt'
+        into 'META-INF/licenses'
+    }
+    from(rootProject.file('LICENSE'))
+    from(rootProject.file('licenses/NOTICE.md'))
+    configurations = [project.configurations.shade]
+    archiveClassifier = ''
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    relocate 'com.google.gson', 'dev.eyecrasher.everywhere.shadow.gson'
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class', 'META-INF/versions/**/module-info.class'
+    manifest { attributes 'MixinConfigs': 'plasmo_everywhere.mixins.json' }
+}
+mixin {
+    add sourceSets.main, 'plasmo_everywhere.refmap.json'
+    config 'plasmo_everywhere.mixins.json'
+}
+reobf { shadowJar {} }
+tasks.named('assemble') { dependsOn 'reobfShadowJar' }
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') { expand(version: project.version) }
+}
+tasks.register('verifyClientState', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.forge.ClientStateTest'
+}
+tasks.named('test') { enabled = false }
+check.dependsOn verifyClientState
+tasks.named('build') { dependsOn ':core:build', ':relay:build', 'reobfShadowJar' }
+
+// Development-only validation mod: never packaged in the release archive.
+if (project.hasProperty('smokeTest')) {
+    sourceSets {
+        smoke {
+            compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+            runtimeClasspath += sourceSets.main.runtimeClasspath
+        }
+    }
+    minecraft.runs.client {
+        property 'everywhere.uiSmoke', 'true'
+        mods {
+            plasmo_everywhere { source sourceSets.smoke }
+        }
+    }
+}
+
+tasks.withType(JavaExec).matching { it.name == 'runClient' }.configureEach {
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+}
+// The shaded mod carries one provenance record for this complete standalone project.
+
+allprojects {
+    tasks.withType(JavaExec).configureEach {
+        if (name != 'runClient') javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    }
+}
+
+// Plasmo's production Forge JAR embeds SRG names directly in Mixin annotations.
+// ForgeGradle remaps bytecode references for named development runs, but not these
+// annotation strings. Transform only the isolated development dependency; release
+// archives never contain Plasmo Voice and use its original published JAR.
+def devPlasmo = layout.buildDirectory.file('dev-plasmo/plasmovoice-named.jar')
+tasks.register('prepareDevPlasmo') {
+    dependsOn 'createSrgToMcp', 'compileJava'
+    inputs.files(configurations.compileClasspath)
+    inputs.file(layout.buildDirectory.file('createSrgToMcp/output.srg'))
+    outputs.file(devPlasmo)
+    doLast {
+        def mappings = [:]
+        file('build/createSrgToMcp/output.srg').eachLine { line ->
+            def parts = line.split(' ')
+            if (parts[0] == 'MD:' || parts[0] == 'FD:') {
+                def left = parts[1].tokenize('/').last()
+                def right = parts[parts[0] == 'MD:' ? 3 : 2].tokenize('/').last()
+                mappings[left] = right
+            }
+        }
+        def pv = configurations.compileClasspath.files.find { it.name.startsWith('plasmo-voice-') }
+        if (pv == null) throw new GradleException('Plasmo Voice development dependency missing')
+        def target = devPlasmo.get().asFile
+        target.parentFile.mkdirs()
+        def input = new java.util.zip.ZipFile(pv)
+        def output = new java.util.zip.ZipOutputStream(new FileOutputStream(target))
+        try {
+            input.entries().each { entry ->
+                byte[] bytes = input.getInputStream(entry).bytes
+                if (entry.name.endsWith('.class')) {
+                    def reader = new DataInputStream(new ByteArrayInputStream(bytes))
+                    def buffer = new ByteArrayOutputStream()
+                    def writer = new DataOutputStream(buffer)
+                    writer.writeInt(reader.readInt()); writer.writeShort(reader.readUnsignedShort()); writer.writeShort(reader.readUnsignedShort())
+                    int count = reader.readUnsignedShort(); writer.writeShort(count)
+                    for (int n = 1; n < count; n++) {
+                        int tag = reader.readUnsignedByte(); writer.writeByte(tag)
+                        switch(tag) {
+                            case 1:
+                                String value = reader.readUTF()
+                                value = value.replaceAll(/\b(?:m_[0-9]+_|f_[0-9]+_|func_[0-9]+_[A-Za-z_]*|field_[0-9]+_[A-Za-z_]*)\b/) { name -> mappings.getOrDefault(name, name) }
+                                writer.writeUTF(value); break
+                            case [3,4,9,10,11,12,17,18]: writer.writeInt(reader.readInt()); break
+                            case [5,6]: writer.writeLong(reader.readLong()); n++; break
+                            case [7,8,16,19,20]: writer.writeShort(reader.readUnsignedShort()); break
+                            case 15: writer.writeByte(reader.readUnsignedByte()); writer.writeShort(reader.readUnsignedShort()); break
+                            default: throw new GradleException('Unknown constant pool tag: ' + tag)
+                        }
+                    }
+                    writer.write(reader.readAllBytes()); writer.close(); bytes = buffer.toByteArray()
+                }
+                output.putNextEntry(new java.util.zip.ZipEntry(entry.name)); output.write(bytes); output.closeEntry()
+            }
+        } finally { output.close(); input.close() }
+    }
+}
+dependencies { runtimeOnly files(devPlasmo).builtBy(tasks.named('prepareDevPlasmo')) }
+
+// Incremental javac can drop the annotation processor's refmap when only a
+// non-Mixin class changes. A complete pass preserves production SRG targets.
+tasks.named('compileJava', JavaCompile) {
+    options.incremental = false
+    outputs.file(layout.buildDirectory.file('tmp/compileJava/compileJava-refmap.json'))
+}

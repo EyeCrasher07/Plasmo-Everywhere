@@ -1,0 +1,146 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version '1.17.21'
+    id 'com.gradleup.shadow' version '9.2.2'
+}
+
+allprojects {
+    group = 'dev.eyecrasher.everywhere'
+    version = '1.0.0-beta.1'
+    repositories { mavenCentral() }
+}
+
+// Public, deterministic build inputs only. No paths, timestamps or environment
+// from the build machine enter the distributable provenance record.
+def releaseInputs = files(
+        'build.gradle', 'settings.gradle', 'gradle.properties', 'gradlew', 'gradlew.bat',
+        'gradle/wrapper/gradle-wrapper.jar', 'gradle/wrapper/gradle-wrapper.properties',
+        'core/build.gradle', 'relay/build.gradle',
+        'LICENSE', 'licenses/NOTICE.md', 'artwork/icon.png',
+        fileTree('licenses') { include '*.txt' },
+        fileTree('core/src/main'), fileTree('src/main'), fileTree('relay/src/main'))
+def buildInfo = layout.buildDirectory.file('generated/release/build.json')
+tasks.register('writeBuildInfo') {
+    inputs.files(releaseInputs).withPropertyName('releaseInputs').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.property('releaseVersion', provider { project.version.toString() })
+    outputs.file(buildInfo)
+    doLast {
+        def hashes = new TreeMap<String, String>()
+        releaseInputs.files.each { input ->
+            if (java.nio.file.Files.isSymbolicLink(input.toPath()))
+                throw new GradleException('Release input must be a regular file: ' + relativePath(input))
+            hashes.put(relativePath(input).replace('\\', '/'), MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString())
+        }
+        def target = buildInfo.get().asFile
+        target.parentFile.mkdirs()
+        target.text = JsonOutput.toJson([schema: 1, version: project.version.toString(), files: hashes]) + '\n'
+    }
+}
+allprojects {
+    apply plugin: 'java-library'
+    java {
+        toolchain.languageVersion = JavaLanguageVersion.of(25)
+        withSourcesJar()
+    }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+    tasks.withType(Jar).configureEach {
+        dependsOn rootProject.tasks.named('writeBuildInfo')
+        from(buildInfo) { into 'META-INF/plasmo-everywhere' }
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+}
+
+base { archivesName = 'plasmo-everywhere-fabric' }
+tasks.withType(Jar).configureEach { archiveVersion = project.version.toString() + '+1.21.6' }
+tasks.named('remapJar') { archiveVersion = project.version.toString() + '+1.21.6' }
+tasks.named('remapSourcesJar') { archiveVersion = project.version.toString() + '+1.21.6' }
+repositories { maven { url = 'https://api.modrinth.com/maven' } }
+configurations {
+    shade
+    implementation.extendsFrom(shade)
+}
+dependencies {
+    minecraft 'com.mojang:minecraft:1.21.6'
+    mappings loom.officialMojangMappings()
+    modImplementation 'net.fabricmc:fabric-loader:0.19.5'
+    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.128.2+1.21.6'
+    modImplementation 'maven.modrinth:plasmo-voice:FoUzQj6E'
+    shade project(':core')
+}
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+jar {
+    from(rootProject.file('LICENSE'))
+    from(rootProject.file('licenses/NOTICE.md'))
+}
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand(version: project.version) }
+}
+tasks.register('verifyClientState', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.fabric.ClientStateTest'
+}
+// Executable main-based checks are wired into check below, as in core and relay.
+tasks.named('test') { enabled = false }
+check.dependsOn verifyClientState
+loom {
+    mods {
+        plasmo_everywhere { sourceSet sourceSets.main }
+    }
+    runs {
+        server { programArg 'nogui'; runDir 'run/server' }
+        actor {
+            client(); runDir 'run/actor'
+            programArgs '--username', 'EverywhereActor', '--width', '960', '--height', '540', '--quickPlayMultiplayer', '127.0.0.1:25576'
+            vmArgs '-Xmx1500M'
+        }
+        observer {
+            client(); runDir 'run/observer'
+            programArgs '--username', 'EverywhereFriend', '--width', '960', '--height', '540', '--quickPlayMultiplayer', '127.0.0.1:25576'
+            vmArgs '-Xmx1500M'
+        }
+    }
+}
+// Optional development-only mod. It is never included in the distributable JAR.
+if (project.hasProperty('smokeTest')) {
+    sourceSets {
+        smoke {
+            compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+            runtimeClasspath += sourceSets.main.runtimeClasspath
+        }
+    }
+    loom.mods {
+        plasmo_everywhere_smoke { sourceSet sourceSets.smoke }
+    }
+    loom.runs.actor { source sourceSets.smoke }
+    loom.runs.observer { source sourceSets.smoke }
+    loom.runs {
+        uiSmoke {
+            client(); runDir 'run/ui-smoke'; source sourceSets.smoke
+            programArgs '--username', 'EverywhereUiTest', '--width', '960', '--height', '540'
+            vmArgs '-Xmx1500M', '-Deverywhere.uiSmoke=true'
+        }
+    }
+}
+
+// A version folder is a complete project, including its shared modules and checks.
+tasks.named('build') { dependsOn ':core:build', ':relay:build' }
+
+shadowJar {
+    from(rootProject.file('LICENSE'))
+    from(rootProject.file('licenses/NOTICE.md'))
+    from(rootProject.file('licenses')) { include '*.txt'; into 'META-INF/licenses' }
+    configurations = [project.configurations.shade]
+    archiveClassifier = 'dev-shadow'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    relocate 'com.google.gson', 'dev.eyecrasher.everywhere.shadow.gson'
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class', 'META-INF/versions/**/module-info.class'
+}
+remapJar {
+    dependsOn shadowJar
+    inputFile = shadowJar.archiveFile
+}

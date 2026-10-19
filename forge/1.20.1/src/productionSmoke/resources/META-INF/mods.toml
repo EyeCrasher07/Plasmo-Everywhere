@@ -1,0 +1,7 @@
+modLoader="javafml"
+loaderVersion="[36,)"
+license="GPL-3.0-only"
+[[mods]]
+modId="everywhere_production_smoke"
+version="1.0"
+displayName="Everywhere isolated production smoke"

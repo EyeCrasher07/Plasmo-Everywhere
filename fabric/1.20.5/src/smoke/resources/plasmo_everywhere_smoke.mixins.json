@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "dev.eyecrasher.everywhere.smoke.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "BridgeCaptureMixin",
+    "BridgeOwnerTickMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

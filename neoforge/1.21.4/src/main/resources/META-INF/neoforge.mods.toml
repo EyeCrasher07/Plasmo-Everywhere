@@ -1,0 +1,32 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="GPL-3.0-only"
+issueTrackerURL="https://github.com/EyeCrasher07/Plasmo-Everywhere/issues"
+[[mods]]
+modId="plasmo_everywhere"
+version="${version}"
+displayName="Plasmo Everywhere"
+displayTest="IGNORE_ALL_VERSION"
+logoFile="assets/plasmo_everywhere/icon.png"
+authors="EyeCrasher"
+description="Automatic proximity voice for Plasmo Voice on servers without a voice plugin."
+[[mixins]]
+config="plasmo_everywhere.mixins.json"
+[[dependencies.plasmo_everywhere]]
+modId="neoforge"
+type="required"
+versionRange="[21.4.161]"
+ordering="NONE"
+side="CLIENT"
+[[dependencies.plasmo_everywhere]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.4]"
+ordering="NONE"
+side="CLIENT"
+[[dependencies.plasmo_everywhere]]
+modId="plasmovoice"
+type="required"
+versionRange="[2.1.17,2.2)"
+ordering="AFTER"
+side="CLIENT"

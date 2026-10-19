@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "plasmo_everywhere_smoke",
+  "version": "1.0",
+  "name": "Everywhere development audio check",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.eyecrasher.everywhere.smoke.AudioSmoke",
+      "dev.eyecrasher.everywhere.fabric.UiSmoke",
+      "dev.eyecrasher.everywhere.fabric.BridgeSmoke"
+    ]
+  },
+  "depends": {
+    "plasmo_everywhere": "*"
+  },
+  "mixins": [
+    "plasmo_everywhere_smoke.mixins.json"
+  ]
+}

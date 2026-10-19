@@ -1,0 +1,100 @@
+plugins { id 'com.gradleup.shadow' version '9.2.2' }
+// Executable network checks run through verifyRelay, without a test framework.
+tasks.named('test') { enabled = false }
+dependencies {
+    implementation project(':core')
+    implementation 'org.java-websocket:Java-WebSocket:1.6.0'
+    runtimeOnly 'org.slf4j:slf4j-simple:2.0.17'
+}
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+jar { manifest { attributes 'Main-Class': 'dev.eyecrasher.everywhere.relay.RelayMain' } }
+shadowJar {
+    archiveBaseName = 'plasmo-everywhere-relay'
+    archiveClassifier = ''
+    mergeServiceFiles()
+    from(rootProject.file('licenses/NOTICE.md'))
+    from(rootProject.file('LICENSE'))
+    from(rootProject.file('licenses')) {
+        include '*.txt'
+        into 'META-INF/licenses'
+    }
+}
+assemble.dependsOn shadowJar
+tasks.register('verifyRelay', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.RelayTest'
+}
+check.dependsOn verifyRelay
+tasks.register('verifyTlsFallback', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.core.TlsFallbackTest'
+}
+check.dependsOn verifyTlsFallback
+tasks.register('verifyReleaseLoad', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.ReleaseLoadTest'
+    args "--clients=${providers.gradleProperty('loadClients').getOrElse('10')}",
+            "--seconds=${providers.gradleProperty('loadSeconds').getOrElse('30')}",
+            "--udp=${providers.gradleProperty('loadUdp').getOrElse('true')}",
+            "--pps=${providers.gradleProperty('loadPps').getOrElse('20')}",
+            "--speakersPerRoom=${providers.gradleProperty('loadSpeakersPerRoom').getOrElse('1')}"
+}
+// Deliberate opt-in: 1000 shared-HTTP-client synthetic clients, never a public target.
+tasks.register('verifyScaleLoad', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.ScaleLoadTest'
+    maxHeapSize = providers.gradleProperty('scaleHeap').getOrElse('512m')
+    args "--clients=${providers.gradleProperty('scaleClients').getOrElse('1000')}",
+            "--seconds=${providers.gradleProperty('scaleSeconds').getOrElse('60')}",
+            "--relayed=${providers.gradleProperty('scaleRelayed').getOrElse('200')}",
+            "--pps=${providers.gradleProperty('scalePps').getOrElse('20')}",
+            "--udp=${providers.gradleProperty('scaleUdp').getOrElse('true')}",
+            "--rooms=${providers.gradleProperty('scaleRooms').getOrElse('1')}",
+            "--changes=${providers.gradleProperty('scaleChanges').getOrElse('10')}"
+}
+tasks.register('verifyPublicTlsFallback', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.core.TlsFallbackTest'
+    providers.gradleProperty('discoveryNodes').getOrElse('wss://79.76.120.82/voice,wss://158.179.207.22/voice').split(',').each { args it }
+}
+tasks.register('verifyAutomaticRoutes', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.core.AutomaticRoutesTest'
+    args providers.gradleProperty('routesCase').getOrElse('all')
+}
+tasks.register('verifySessions', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.SessionTest'
+}
+tasks.register('verifyPublicSessions', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.SessionTest'
+    args providers.gradleProperty('relayUrl').getOrElse('wss://79.76.120.82/voice')
+}
+tasks.register('verifyPublicDiscovery', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.core.TcpDiscoveryTest'
+    providers.gradleProperty('discoveryNodes').getOrElse('wss://79.76.120.82/voice,wss://158.179.207.22/voice').split(',').each { args it }
+}
+tasks.register('verifyDirectory', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.DirectoryTest'
+}
+tasks.register('verifyPublicRelay', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.RelayTest'
+    args providers.gradleProperty('relayUrl').getOrElse('wss://79.76.120.82/voice')
+    args providers.gradleProperty('directoryUrl').getOrElse('https://79.76.120.82/route')
+    args providers.gradleProperty('testRoom').getOrElse('a'.repeat(64))
+}

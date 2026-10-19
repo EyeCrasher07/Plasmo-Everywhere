@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.eyecrasher.everywhere.forge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "VoiceClientMixin",
+    "CaptureMixin",
+    "NativeChannelMixin",
+    "MinecraftWorldMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

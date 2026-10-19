@@ -1,0 +1,7 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="GPL-3.0-only"
+[[mods]]
+modId="plasmo_everywhere_smoke"
+version="0.0.0"
+displayName="Everywhere development smoke"

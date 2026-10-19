@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "plasmo_everywhere",
+  "version": "${version}",
+  "name": "Plasmo Everywhere",
+  "description": "Automatic proximity voice for Plasmo Voice on servers without a voice plugin.",
+  "icon": "assets/plasmo_everywhere/icon.png",
+  "license": "GPL-3.0-only",
+  "environment": "client",
+  "contact": {
+    "sources": "https://github.com/EyeCrasher07/Plasmo-Everywhere",
+    "issues": "https://github.com/EyeCrasher07/Plasmo-Everywhere/issues"
+  },
+  "entrypoints": { "client": ["dev.eyecrasher.everywhere.fabric.EverywhereMod"] },
+  "mixins": ["plasmo_everywhere.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "fabric-api": "*",
+    "minecraft": "1.21",
+    "java": ">=21",
+    "plasmovoice": "2.1.17"
+  }
+}

@@ -1,0 +1,31 @@
+modLoader="javafml"
+loaderVersion="[49,)"
+license="GPL-3.0-only"
+issueTrackerURL="https://github.com/EyeCrasher07/Plasmo-Everywhere/issues"
+[[mods]]
+modId="plasmo_everywhere"
+version="${version}"
+displayName="Plasmo Everywhere"
+displayURL="https://github.com/EyeCrasher07/Plasmo-Everywhere"
+logoFile="assets/plasmo_everywhere/icon.png"
+authors="EyeCrasher"
+displayTest="IGNORE_SERVER_VERSION"
+description="Client-side proximity voice chat with Plasmo Voice on servers without a voice chat plugin."
+[[dependencies.plasmo_everywhere]]
+modId="forge"
+mandatory=true
+versionRange="[49,)"
+ordering="NONE"
+side="CLIENT"
+[[dependencies.plasmo_everywhere]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.3]"
+ordering="NONE"
+side="CLIENT"
+[[dependencies.plasmo_everywhere]]
+modId="plasmovoice"
+mandatory=true
+versionRange="[2.1.17,2.2)"
+ordering="AFTER"
+side="CLIENT"

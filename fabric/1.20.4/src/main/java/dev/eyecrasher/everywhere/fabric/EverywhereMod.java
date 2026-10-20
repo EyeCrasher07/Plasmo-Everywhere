@@ -146,6 +146,11 @@ public final class EverywhereMod implements ClientModInitializer {
         while (settingsKey.consumeClick()) if (mc.screen == null) openSettings(null);
         if (!config.enabled || mc.player == null || mc.level == null || mc.getCurrentServer() == null) {
             if (transport != null || bridge != null || resolving) shutdown(config.enabled);
+            // The disconnect callback can run before Minecraft clears its level.
+            if (mc.level == null) {
+                world = null;
+                if (config.enabled && !nativeVoice) state = State.DISCONNECTED;
+            }
             if (!config.enabled) state = State.DISABLED;
             return;
         }

@@ -27,6 +27,6 @@ side="CLIENT"
 [[dependencies.plasmo_everywhere]]
 modId="plasmovoice"
 type="required"
-versionRange="[2.1.17,2.2)"
+versionRange="[2.1.17,)"
 ordering="AFTER"
 side="CLIENT"

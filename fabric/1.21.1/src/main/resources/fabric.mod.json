@@ -18,6 +18,6 @@
     "fabric-api": "*",
     "minecraft": "1.21.1",
     "java": ">=21",
-    "plasmovoice": "2.1.17"
+    "plasmovoice": ">=2.1.17"
   }
 }

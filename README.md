@@ -6,7 +6,7 @@ A client-side addon for Plasmo Voice that lets nearby players talk on Minecraft 
 
 ## Requirements
 
-Choose the JAR for your Minecraft version and loader: **Fabric, Forge or NeoForge**. Install the matching **Plasmo Voice 2.x** client; Fabric also requires Fabric API. Available combinations are listed with the release files.
+Choose the JAR for your Minecraft version and loader: **Fabric, Forge or NeoForge**. Install the matching **Plasmo Voice** client (2.1.17 or newer where available); Fabric also requires Fabric API. Available combinations are listed with the release files.
 
 Java **17+** is required through Minecraft 1.20.4, **21+** for 1.20.5–1.21.11, and **25+** for 26.x.
 

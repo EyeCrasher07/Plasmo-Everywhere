@@ -45,6 +45,7 @@ public final class ProtocolTest {
         DirectoryFallbackTest.verify();
         ConnectionTraceTest.verify();
         RuntimeCompatTest.verify();
+        NodeSelectionTest.verify();
     }
     public static void check(boolean value, String name) { if (!value) throw new AssertionError(name); }
     private static void rejects(Runnable action, String name) {

@@ -21,8 +21,19 @@ public final class NetworkDirectory {
             if (udpPort < 1 || udpPort > 65535) throw new IllegalArgumentException("Probe port");
         }
     }
-    public record Route(URI control, List<Probe> probes) {
-        public Route { requireSecure(control, "/voice"); probes = List.copyOf(probes); }
+    public record Node(String id,URI control,int udpPort) {
+        public Node {
+            if(id==null || !id.matches("[a-z0-9_-]{1,32}"))throw new IllegalArgumentException("Node identifier");
+            new Probe(control,udpPort);
+        }
+    }
+    public record Route(URI control, List<Probe> probes,List<Node> nodes) {
+        public Route(URI control,List<Probe> probes) { this(control,probes,List.of()); }
+        public Route {
+            requireSecure(control, "/voice");probes=List.copyOf(probes);nodes=List.copyOf(nodes);
+            if(probes.size()>4 || nodes.size()>16 || nodes.stream().map(Node::id).distinct().count()!=nodes.size()
+                    || nodes.stream().map(Node::control).distinct().count()!=nodes.size())throw new IllegalArgumentException("Node list");
+        }
     }
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build();
     private static final ScheduledExecutorService HEDGE = Executors.newSingleThreadScheduledExecutor(task -> {
@@ -188,7 +199,15 @@ public final class NetworkDirectory {
                     probes.add(new Probe(URI.create(Wire.string(p,"control",512)), p.get("udpPort").getAsInt()));
                 }
             }
-            return new Route(control, probes);
+            List<Node> nodes=new ArrayList<>();
+            if(j.has("federation") && j.get("federation").getAsInt()==1 && j.has("nodes")) {
+                var list=j.getAsJsonArray("nodes");if(list.size()>16)throw new IllegalArgumentException("Node limit");
+                for(var item:list) {
+                    var node=item.getAsJsonObject();nodes.add(new Node(Wire.string(node,"id",32),
+                            URI.create(Wire.string(node,"control",512)),node.get("udpPort").getAsInt()));
+                }
+            }
+            return new Route(control, probes,nodes);
     }
     public static void requireSecure(URI uri,String path) {
         String secure=path.equals("/voice")?"wss":"https", local=path.equals("/voice")?"ws":"http";

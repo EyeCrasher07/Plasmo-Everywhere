@@ -10,12 +10,14 @@ import java.net.*;
 import java.net.http.*;
 import java.nio.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.*;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import javax.net.ssl.SSLContext;
 
 /** Stateful discovery and bounded opaque packet forwarding. No audio decoding. */
@@ -38,6 +40,12 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
     private final Map<UUID,Session> sessions = new HashMap<>();
     private final Map<String,Map<UUID,Session>> rooms = new HashMap<>();
     private final Map<String,NearbyIndex<Session>> nearbyIndexes = new HashMap<>();
+    private final Map<UUID,RemotePeer> remoteSessions=new HashMap<>();
+    private final Map<String,Map<UUID,RemotePeer>> remoteRooms=new HashMap<>();
+    private final Map<String,Integer> remoteCounts=new HashMap<>();
+    private final Map<UUID,RateLimit> remotePacketLimits=new HashMap<>();
+    private final RateLimit federationPackets=new RateLimit(10000,2000);
+    private volatile Federation federation;
     private final Map<String,RateLimit> ipLimits = new LinkedHashMap<>();
     private final RateLimit accepts = new RateLimit(10, 20), udpBudget = new RateLimit(5000, 1000);
     private final RateLimit stunBudget = new RateLimit(64, 128);
@@ -53,7 +61,12 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
     private long relayedUdpVoice,relayedWssVoice,peerRefreshes,peerDescriptions,relayQueueDrops,controlQueueDrops;
     private final AtomicLong udpBudgetDrops = new AtomicLong();
     private int verifiedSessions;
+    private UsageStatistics usage;
     private volatile boolean closed;
+
+    private record RemotePeer(String node,UUID id,UUID player,String name,String room,String dimension,String key,
+                              boolean verified,boolean transports,Set<UUID> nearby,InetSocketAddress endpoint,
+                              Set<InetSocketAddress> candidates,Set<InetSocketAddress> tcp) {}
 
     private static final class Session {
         final WebSocket ws;
@@ -75,7 +88,7 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         boolean joining, joined, verified, udpPreferred, transports, closeRequested;
         InetSocketAddress endpoint, pendingEndpoint;
         byte[] pendingChallenge;
-        long lastUdp, pendingAt, lastControl = created;
+        long lastUdp, pendingAt, lastControl = created, joinedAt;
         Session(WebSocket ws) { this.ws = ws; }
     }
 
@@ -114,9 +127,17 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         closer=new Thread(this::closeSockets,"everywhere-relay-close"); closer.setDaemon(true); closer.start();
     }
     static int defaultReserve(int capacity) { return Math.min(capacity-1,(capacity+9)/10); }
+    synchronized void enableFederation(Federation.Config config) {
+        if(federation!=null)throw new IllegalStateException("Federation already configured");
+        federation=new Federation(this,config);
+    }
     // Server-to-server routing maintenance only; never part of the public health response.
     synchronized Set<String> activeRooms() { return Set.copyOf(rooms.keySet()); }
     public int udpPort() { return udp.getLocalPort(); }
+    synchronized void enableUsage(Path file) {
+        if (usage!=null || !sessions.isEmpty()) throw new IllegalStateException("Usage must be enabled before accepting players");
+        usage=new UsageStatistics(file);
+    }
     public synchronized JsonObject health() {
         boolean ok = !closed && reader.isAlive() && !udp.isClosed() && getPort() > 0;
         JsonObject j = new JsonObject(); j.addProperty("status", ok ? "ok" : "unavailable");
@@ -130,6 +151,10 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         j.addProperty("nearbyDeclarations",nearbyIndexes.values().stream().mapToInt(NearbyIndex::edges).sum());
         j.addProperty("udpBudgetDrops",udpBudgetDrops.get()); j.addProperty("relayQueueDrops",relayQueueDrops);
         j.addProperty("controlQueueDrops",controlQueueDrops);
+        if(federation!=null) {
+            JsonObject mesh=federation.health();mesh.addProperty("remoteSessions",remoteSessions.size());j.add("federation",mesh);
+        }
+        if (usage!=null) j.add("usage",usage.snapshot());
         j.addProperty("version", dev.eyecrasher.everywhere.core.BuildVersion.VERSION); j.addProperty("checkedAt", java.time.Instant.now().toString());
         return j;
     }
@@ -138,6 +163,11 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         System.out.println("Relay ready on TCP " + getPort() + ", UDP " + udpPort());
     }
     @Override public void onOpen(WebSocket ws, ClientHandshake handshake) {
+        if("/federation".equals(handshake.getResourceDescriptor())) {
+            Federation mesh=federation;
+            if(mesh==null || !mesh.accept(ws,handshake))ws.close(1008,"Federation authentication required");
+            return;
+        }
         boolean admitted;
         synchronized(this) { admitted=admit(ws,handshake); }
         if(!admitted)ws.close(1008,"Connection limit");
@@ -167,6 +197,7 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         j.addProperty("resumption", true); send(s, j); return true;
     }
     @Override public synchronized void onMessage(WebSocket ws, String text) {
+        if(federation!=null && federation.incoming(ws)) { federation.text(ws,text);return; }
         Session s = sockets.get(ws);
         if (s == null || s.closeRequested) return;
         try {
@@ -259,6 +290,10 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         if(sockets.get(s.ws)!=s || s.closeRequested || !s.ws.isOpen())return;
         Map<UUID,Session> room = rooms.get(s.room);
         Session previous=room==null?null:room.get(s.player);
+        RemotePeer remote=remoteRooms.getOrDefault(s.room,Map.of()).get(s.player);
+        if(remote!=null && (!verified || remote.verified)) {
+            requestClose(s.ws,1008,"This player already has a session");return;
+        }
         boolean resumes = previous != null && previous.id.equals(s.previousSession)
                 && (!previous.verified || (verified && Objects.equals(previous.account, s.account)))
                 && s.sessionProof != null && SessionProof.verify(s.sessionProof, previous.udpKey, previous.id,
@@ -277,13 +312,15 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
             requestClose(previous.ws,1008,resumes ? "Session replaced by reconnect" : "Verified account reclaimed this player");
         }
         s.verified = verified; s.joined = true; s.lastControl = System.nanoTime(); sessions.put(s.id, s);
+        s.joinedAt=System.nanoTime();
+        if(usage!=null)usage.joined(verified,resumes,sessions.size());
         if(verified)verifiedSessions++;
         room=rooms.computeIfAbsent(s.room,k -> new HashMap<>());
         nearbyIndexes.computeIfAbsent(s.room,k -> new NearbyIndex<>());
         room.put(s.player, s);
         JsonObject j = Wire.message("welcome"); j.addProperty("session", s.id.toString());
         j.addProperty("udpKey", Wire.base64(s.udpKey)); j.addProperty("udpPort", udpPort());
-        j.addProperty("verified", verified); j.addProperty("candidates", true); j.addProperty("transports",1); send(s, j); refresh(s);
+        j.addProperty("verified", verified); j.addProperty("candidates", true); j.addProperty("transports",1); send(s, j); refresh(s);publish(s);
     }
     private boolean allowed(Session a, Session b) {
         return a != b && a.joined && b.joined && !a.closeRequested && !b.closeRequested && a.room.equals(b.room) && a.dimension.equals(b.dimension)
@@ -299,6 +336,7 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         collectObservers(s,next,room,index,affected);
         index.replace(s,s.nearby,next); s.nearby=next;
         affected.forEach(this::refresh);
+        publish(s);
     }
     private static void collectObservers(Session s,Set<UUID> players,Map<UUID,Session> room,
                                          NearbyIndex<Session> index,Set<Session> affected) {
@@ -314,6 +352,7 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
     private void refreshPeerData(Session s) {
         Set<Session> affected=new LinkedHashSet<>(); collectPeerDataUpdates(s,affected);
         affected.forEach(this::refresh);
+        publish(s);
     }
     private void refresh(Session a) {
         if(!a.joined || a.closeRequested)return;
@@ -323,7 +362,12 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         JsonObject j = Wire.message("peers"); JsonArray list = new JsonArray(); Set<UUID> links = new HashSet<>();
         for (UUID player : a.nearby) {
             Session b = room.get(player);
-            if (b == null || !allowed(a, b)) continue;
+            if(b==null) {
+                RemotePeer remote=remoteRooms.getOrDefault(a.room,Map.of()).get(player);
+                if(remote!=null && allowed(a,remote)) { links.add(remote.id);peerDescriptions++;list.add(description(a,remote)); }
+                continue;
+            }
+            if (!allowed(a, b)) continue;
             links.add(b.id); peerDescriptions++; JsonObject p = new JsonObject();
             p.addProperty("session", b.id.toString()); p.addProperty("player", b.player.toString());
             p.addProperty("name", b.name); p.addProperty("key", b.publicKey); p.addProperty("verified", b.verified);
@@ -342,6 +386,7 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
         a.links = Set.copyOf(links); j.add("peers", list); send(a, j);
     }
     @Override public synchronized void onMessage(WebSocket ws, ByteBuffer buffer) {
+        if(federation!=null && federation.incoming(ws)) { federation.data(ws,buffer);return; }
         Session s = sockets.get(ws);
         if (s == null || s.closeRequested || !s.joined || !s.packets.take() || buffer.remaining() > Wire.MAX_FRAME) return;
         byte[] bytes = new byte[buffer.remaining()]; buffer.get(bytes);
@@ -350,7 +395,16 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
     private void forward(Session s, Wire.Frame frame, byte[] bytes) {
         if (!frame.from().equals(s.id)) return;
         Session target = sessions.get(frame.to());
+        if(target==null) {
+            RemotePeer remote=remoteSessions.get(frame.to());
+            if(remote!=null && federation!=null && s.links.contains(remote.id) && allowed(s,remote)
+                    && media(frame))federation.forward(remote.node,bytes);
+            return;
+        }
         if (target == null || !s.links.contains(target.id) || !allowed(s, target)) return;
+        deliver(target,frame,bytes);
+    }
+    private void deliver(Session target,Wire.Frame frame,byte[] bytes) {
         if (frame.kind() != Wire.END && target.udpPreferred && target.endpoint != null && System.nanoTime() - target.lastUdp < TimeUnit.SECONDS.toNanos(8)) {
             if(sendUdp(target, Wire.ROUTE, bytes, target.endpoint) && frame.kind()==Wire.VOICE)relayedUdpVoice++;
         } else if (queued(target.ws) < MAX_QUEUE) {
@@ -408,6 +462,97 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
             udp.send(new DatagramPacket(bytes, bytes.length, endpoint)); return true;
         } catch (Exception ignored) { return false; }
     }
+    private static boolean media(Wire.Frame frame) { return frame.kind()==Wire.VOICE || frame.kind()==Wire.END; }
+    private boolean allowed(Session local,RemotePeer remote) {
+        return local.joined && !local.closeRequested && !local.player.equals(remote.player)
+                && local.room.equals(remote.room) && local.dimension.equals(remote.dimension)
+                && local.nearby.contains(remote.player) && remote.nearby.contains(local.player);
+    }
+    private JsonObject description(Session local,RemotePeer remote) {
+        JsonObject peer=new JsonObject();peer.addProperty("session",remote.id.toString());peer.addProperty("player",remote.player.toString());
+        peer.addProperty("name",remote.name);peer.addProperty("key",remote.key);peer.addProperty("verified",remote.verified);
+        if(remote.endpoint!=null) { peer.addProperty("ip",remote.endpoint.getAddress().getHostAddress());peer.addProperty("port",remote.endpoint.getPort()); }
+        JsonArray candidates=new JsonArray();remote.candidates.forEach(address -> candidates.add(Endpoints.write(address)));peer.add("candidates",candidates);
+        if(local.transports && remote.transports) {
+            peer.addProperty("transports",1);JsonArray tcp=new JsonArray();remote.tcp.forEach(address -> tcp.add(Endpoints.write(address)));peer.add("tcp",tcp);
+        }
+        return peer;
+    }
+    private JsonObject member(Session local) {
+        JsonObject value=Wire.message("member");value.addProperty("session",local.id.toString());value.addProperty("player",local.player.toString());
+        value.addProperty("name",local.name);value.addProperty("room",local.room);value.addProperty("dimension",local.dimension);
+        value.addProperty("key",local.publicKey);value.addProperty("verified",local.verified);value.addProperty("transports",local.transports);
+        JsonArray nearby=new JsonArray();local.nearby.forEach(player -> nearby.add(player.toString()));value.add("nearby",nearby);
+        if(local.endpoint!=null)value.add("endpoint",Endpoints.write(local.endpoint));
+        JsonArray candidates=new JsonArray();local.candidates.forEach(address -> candidates.add(Endpoints.write(address)));value.add("candidates",candidates);
+        JsonArray tcp=new JsonArray();local.tcpCandidates.forEach(address -> tcp.add(Endpoints.write(address)));value.add("tcp",tcp);
+        return value;
+    }
+    private void publish(Session local) { if(federation!=null && local.joined && !local.closeRequested)federation.broadcast(member(local)); }
+    synchronized void federationSnapshot(Consumer<JsonObject> send) {
+        for(Session local:sessions.values())if(local.joined && !local.closeRequested)send.accept(member(local));
+    }
+    private Set<InetSocketAddress> remoteEndpoints(JsonObject value,String field) {
+        JsonArray array=value.getAsJsonArray(field);if(array.size()>4)throw new IllegalArgumentException("Federation candidates");
+        Set<InetSocketAddress> result=new LinkedHashSet<>();
+        for(JsonElement element:array)result.add(Endpoints.read(element.getAsJsonObject(),federation.loopbackOnly()));
+        return Set.copyOf(result);
+    }
+    synchronized void federationMember(String node,JsonObject value) {
+        UUID id=Wire.id(value,"session"),player=Wire.id(value,"player");String room=Wire.string(value,"room",64);
+        String name=Wire.string(value,"name",16),key=Wire.string(value,"key",128),dimension=Wire.string(value,"dimension",128);
+        if(!room.matches("[a-f0-9]{64}") || !name.matches("[A-Za-z0-9_]{1,16}") || sessions.containsKey(id))
+            throw new IllegalArgumentException("Federation identity");
+        try { KeyFactory.getInstance("X25519").generatePublic(new X509EncodedKeySpec(Wire.unbase64(key,64))); }
+        catch(GeneralSecurityException invalid) { throw new IllegalArgumentException("Federation public key",invalid); }
+        RemotePeer previous=remoteSessions.get(id);
+        if(previous!=null && (!previous.node.equals(node) || !previous.player.equals(player) || !previous.room.equals(room)))
+            throw new IllegalArgumentException("Federation session changed identity");
+        if(previous==null && remoteCounts.getOrDefault(node,0)>=MAX_SESSIONS)
+            throw new IllegalArgumentException("Federation session limit");
+        JsonArray list=value.getAsJsonArray("nearby");if(list.size()>MAX_NEARBY)throw new IllegalArgumentException("Federation nearby limit");
+        Set<UUID> nearby=new HashSet<>();list.forEach(element -> nearby.add(UUID.fromString(element.getAsString())));
+        RemotePeer next=new RemotePeer(node,id,player,name,room,dimension,key,value.get("verified").getAsBoolean(),value.get("transports").getAsBoolean(),
+                Set.copyOf(nearby),value.has("endpoint")?Endpoints.read(value.getAsJsonObject("endpoint"),federation.loopbackOnly()):null,
+                remoteEndpoints(value,"candidates"),remoteEndpoints(value,"tcp"));
+        remoteSessions.put(id,next);
+        if(previous==null) { remoteCounts.merge(node,1,Integer::sum);remotePacketLimits.put(id,new RateLimit(1500,200)); }
+        Map<UUID,RemotePeer> peers=remoteRooms.computeIfAbsent(room,unused -> new HashMap<>());
+        RemotePeer existing=peers.get(player);
+        if(existing==null || existing.id.equals(id) || wins(next.verified,next.node,id,existing.verified,existing.node,existing.id))peers.put(player,next);
+        Session local=rooms.getOrDefault(room,Map.of()).get(player);
+        if(local!=null && wins(next.verified,node,id,local.verified,federation.config.node(),local.id)) {
+            detach(local);requestClose(local.ws,1008,"This player already has a session");
+        }
+        refreshRemote(previous);refreshRemote(next);
+    }
+    private static boolean wins(boolean verified,String node,UUID id,boolean otherVerified,String otherNode,UUID otherId) {
+        if(verified!=otherVerified)return verified;
+        int order=node.compareTo(otherNode);return order<0 || order==0 && id.compareTo(otherId)<0;
+    }
+    private void refreshRemote(RemotePeer remote) {
+        if(remote==null)return;
+        Map<UUID,Session> locals=rooms.getOrDefault(remote.room,Map.of());
+        for(UUID player:remote.nearby) { Session local=locals.get(player);if(local!=null && local.nearby.contains(remote.player))refresh(local); }
+    }
+    synchronized void federationLeave(String node,UUID session) {
+        RemotePeer remote=remoteSessions.get(session);if(remote==null)return;
+        if(!remote.node.equals(node))throw new IllegalArgumentException("Federation session owner");
+        remoteSessions.remove(session);remotePacketLimits.remove(session);remoteCounts.computeIfPresent(node,(key,count) -> count==1?null:count-1);
+        Map<UUID,RemotePeer> room=remoteRooms.get(remote.room);
+        if(room!=null) { room.remove(remote.player,remote);if(room.isEmpty())remoteRooms.remove(remote.room); }
+        refreshRemote(remote);
+    }
+    synchronized void federationDisconnected(String node) {
+        List<UUID> removed=remoteSessions.values().stream().filter(remote -> remote.node.equals(node)).map(RemotePeer::id).toList();
+        removed.forEach(id -> federationLeave(node,id));
+    }
+    synchronized boolean federationFrame(String node,Wire.Frame frame,byte[] bytes) {
+        RemotePeer source=remoteSessions.get(frame.from());Session target=sessions.get(frame.to());
+        if(source==null || !source.node.equals(node) || target==null || !media(frame) || !target.links.contains(source.id)
+                || !allowed(target,source) || !federationPackets.take() || !remotePacketLimits.get(source.id).take())return false;
+        deliver(target,frame,bytes);return true;
+    }
     private void send(Session s, JsonObject message) {
         if(s.closeRequested)return;
         if (s.ws.isOpen() && queued(s.ws) < MAX_QUEUE) s.ws.send(Wire.GSON.toJson(message));
@@ -448,18 +593,21 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
                 detach(s); requestClose(s.ws,1008,"Voice heartbeat timed out"); continue;
             }
             if (s.endpoint != null && now - s.lastUdp > TimeUnit.SECONDS.toNanos(12)) {
-                s.endpoint = null; collectPeerDataUpdates(s,changed);
+                s.endpoint = null; collectPeerDataUpdates(s,changed);publish(s);
             }
         }
         changed.forEach(this::refresh);
     }
     @Override public synchronized void onClose(WebSocket ws, int code, String reason, boolean remote) {
+        if(federation!=null && federation.incoming(ws)) { federation.disconnected(ws);return; }
         Session s = sockets.get(ws);
         if(s!=null)detach(s);
     }
     private void detach(Session s) {
         sockets.remove(s.ws,s); s.joined=false; s.links=Set.of();
         if (sessions.remove(s.id,s)) {
+            if(federation!=null) { JsonObject leave=Wire.message("leave");leave.addProperty("session",s.id.toString());federation.broadcast(leave); }
+            if(usage!=null)usage.left(TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-s.joinedAt),sessions.size());
             if(s.verified)verifiedSessions--;
             Set<Session> affected=new LinkedHashSet<>();
             NearbyIndex<Session> index=nearbyIndexes.get(s.room);
@@ -476,13 +624,18 @@ public final class RelayServer extends WebSocketServer implements AutoCloseable 
     }
     @Override public void close() {
         synchronized(this) { if(closed)return; closed=true; }
+        if(federation!=null)federation.close();
         udp.close(); clock.shutdownNow(); auth.shutdownNow();
         try { stop(2000); }
         catch(InterruptedException error) { Thread.currentThread().interrupt(); }
         finally {
             try { closer.join(2000); } catch(InterruptedException error) { Thread.currentThread().interrupt(); }
             finally { closer.interrupt(); }
-            synchronized(this) { closeQueue.clear(); pendingCloses.clear(); }
+            synchronized(this) {
+                for(Session session:List.copyOf(sessions.values()))detach(session);
+                closeQueue.clear(); pendingCloses.clear();
+            }
+            if(usage!=null)usage.close();
         }
     }
 }

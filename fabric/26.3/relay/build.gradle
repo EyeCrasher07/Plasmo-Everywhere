@@ -26,6 +26,18 @@ tasks.register('verifyRelay', JavaExec) {
     mainClass = 'dev.eyecrasher.everywhere.relay.RelayTest'
 }
 check.dependsOn verifyRelay
+tasks.register('verifyFederation', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.FederationTest'
+}
+check.dependsOn verifyFederation
+tasks.register('verifyUsage', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.UsageStatisticsTest'
+}
+check.dependsOn verifyUsage
 tasks.register('verifyTlsFallback', JavaExec) {
     dependsOn testClasses
     classpath = sourceSets.test.runtimeClasspath

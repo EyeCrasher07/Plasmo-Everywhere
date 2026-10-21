@@ -273,6 +273,8 @@ public final class EverywhereMod {
                     } catch(Exception error) { throw new DirectoryFailure(error); }
                 }
                 if(epoch!=generation || Thread.currentThread().isInterrupted())throw new CancellationException();
+                route=NodeSelection.select(route,trace);
+                if(epoch!=generation || Thread.currentThread().isInterrupted())throw new CancellationException();
                 return prepareTransport(mc,epoch,traceAttempt,serverId,id,route,direct,udp,previous,authenticator);
             },this::retire);
             preparation=pending;

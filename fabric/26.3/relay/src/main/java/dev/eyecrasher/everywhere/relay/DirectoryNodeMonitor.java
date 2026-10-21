@@ -62,7 +62,9 @@ final class DirectoryNodeMonitor implements AutoCloseable {
             JsonObject health=relay.health(); JsonObject report=new JsonObject();
             report.addProperty("status",health.get("status").getAsString()); report.addProperty("capacity",health.get("capacity").getAsInt());
             report.addProperty("connections",health.get("connections").getAsInt()); JsonArray rooms=new JsonArray();
-            relay.activeRooms().stream().sorted().forEach(rooms::add); report.add("activeRooms",rooms); return report;
+            relay.activeRooms().stream().sorted().forEach(rooms::add); report.add("activeRooms",rooms);
+            if(health.has("federation"))report.add("federation",health.getAsJsonObject("federation").deepCopy());
+            return report;
         }
     }
     static JsonObject parseBody(byte[] bytes) {
@@ -73,8 +75,16 @@ final class DirectoryNodeMonitor implements AutoCloseable {
     static RoutingDirectory.Report parse(JsonObject value,long now) {
         JsonArray list=value.getAsJsonArray("activeRooms"); if(list.size()>RelayServer.MAX_SESSIONS)throw new IllegalArgumentException("Node rooms");
         Set<String> rooms=new HashSet<>(); for(JsonElement room:list)rooms.add(room.getAsString());
+        JsonObject mesh=value.has("federation")?value.getAsJsonObject("federation"):null;
+        String network=mesh==null?"":Wire.string(mesh,"network",64);
+        boolean ready=mesh!=null && mesh.get("protocol").getAsInt()==1 && mesh.get("ready").getAsBoolean();
+        Set<String> peers=new HashSet<>();
+        if(mesh!=null) {
+            JsonArray members=mesh.getAsJsonArray("peers");if(members==null || members.size()>=Federation.MAX_NODES)throw new IllegalArgumentException("Federation report peers");
+            members.forEach(member -> peers.add(member.getAsString()));
+        }
         return new RoutingDirectory.Report("ok".equals(value.get("status").getAsString()),value.get("capacity").getAsInt(),
-                value.get("connections").getAsInt(),rooms,now);
+                value.get("connections").getAsInt(),rooms,now,network,ready,peers);
     }
     @Override public void close() { worker.shutdownNow(); inFlight.forEach(request -> request.cancel(true)); http.shutdownNow(); }
 }

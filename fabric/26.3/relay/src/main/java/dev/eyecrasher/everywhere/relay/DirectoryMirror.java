@@ -155,6 +155,18 @@ final class DirectoryMirror implements DirectoryRoutes {
             clean.addProperty("control",control.toString()); clean.addProperty("validUntil",until); JsonArray probes=new JsonArray();
             for(var node:nodes) { JsonObject p=new JsonObject(); p.addProperty("control",node.control().toString()); p.addProperty("udpPort",node.udpPort()); probes.add(p); }
             clean.add("probes",probes);
+            if(route.has("federation") && route.get("federation").getAsInt()==1 && route.has("nodes")) {
+                JsonArray choices=route.getAsJsonArray("nodes");if(choices.size()>16)throw new IOException("Directory node limit");
+                JsonArray validated=new JsonArray();Set<String> ids=new HashSet<>();Set<URI> urls=new HashSet<>();
+                for(JsonElement choice:choices) {
+                    JsonObject item=choice.getAsJsonObject();NetworkDirectory.Node value=new NetworkDirectory.Node(Wire.string(item,"id",32),
+                            URI.create(Wire.string(item,"control",512)),item.get("udpPort").getAsInt());
+                    if(!ids.add(value.id()) || !urls.add(value.control()))throw new IOException("Duplicate directory node");
+                    JsonObject output=new JsonObject();output.addProperty("id",value.id());output.addProperty("control",value.control().toString());
+                    output.addProperty("udpPort",value.udpPort());validated.add(output);
+                }
+                clean.addProperty("federation",1);clean.add("nodes",validated);
+            }
             if(!fresh(clean))throw new IOException("Directory reservation expired");
             return clean;
         } catch(IOException invalid) { throw invalid; }

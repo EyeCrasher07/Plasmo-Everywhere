@@ -449,6 +449,7 @@ public final class VoiceClient implements AutoCloseable, WebSocket.Listener {
     }
     @Override public CompletionStage<?> onClose(WebSocket socket, int code, String reason) {
         trace.recordForAttempt(traceAttempt, ConnectionTrace.Stage.CONTROL_CLOSE, closeResult(reason), elapsed(connectStarted), null, code);
+        if(!ready && Set.of("Voice capacity reached","Remaining slots reserved for verified accounts").contains(reason))NodeSelection.failed(uri);
         fail(closeMessage(code, reason)); return null;
     }
     @Override public void onError(WebSocket socket, Throwable error) {
@@ -736,6 +737,8 @@ public final class VoiceClient implements AutoCloseable, WebSocket.Listener {
     private void fail(String reason) { fail(reason, null); }
     private synchronized void fail(String reason, Throwable cause) {
         if (!ended.compareAndSet(false, true)) return;
+        if(!ready && Set.of("Cannot connect to voice service","Voice handshake timed out","Voice connection failed","Voice control send failed").contains(reason))
+            NodeSelection.failed(uri);
         trace.recordForAttempt(traceAttempt, "SESSION_CLOSED", reason.equals("Voice session closed") ? "CLOSED"
                 : reason.equals("Voice handshake timed out") ? "TIMEOUT" : "FAILED", elapsed(connectStarted), cause, -1);
         ready = false; connected.completeExceptionally(new IOException(reason, cause));

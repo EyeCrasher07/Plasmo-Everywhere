@@ -23,6 +23,12 @@ public final class RelayMain {
         int reserve=Integer.parseInt(options.getOrDefault("verified-reserve",String.valueOf(RelayServer.defaultReserve(capacity))));
         RelayServer relay = new RelayServer(bind, port, options.getOrDefault("udp-bind", bind), udpPort, tls,
                 Boolean.parseBoolean(options.getOrDefault("proxy", "false")),capacity,reserve);
+        String usageFile=options.getOrDefault("usage-file",System.getenv("EVERYWHERE_USAGE_FILE"));
+        if(usageFile!=null && !usageFile.isBlank())relay.enableUsage(Path.of(usageFile));
+        if(options.containsKey("federation-config")) {
+            if(!options.containsKey("federation-key-file"))throw new IllegalArgumentException("Federation key file required");
+            relay.enableFederation(Federation.Config.read(Path.of(options.get("federation-config")),Path.of(options.get("federation-key-file"))));
+        }
         String directoryKey=null;
         if(options.containsKey("directory-key-file")) {
             Path keyFile=Path.of(options.get("directory-key-file"));

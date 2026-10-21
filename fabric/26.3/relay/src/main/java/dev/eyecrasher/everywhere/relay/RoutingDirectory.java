@@ -17,13 +17,21 @@ final class RoutingDirectory implements DirectoryRoutes {
     static final int MAX_ROOMS=16384;
     static final long IDLE_MILLIS=24*60*60*1000L, PENDING_MILLIS=5*60*1000L, REPORT_MILLIS=30_000, LEASE_MILLIS=60_000;
     record Node(String id,URI control,int weight,int udpPort,boolean enabled) {}
-    record Report(boolean healthy,int capacity,int connections,Set<String> activeRooms,long checkedAt) {
+    record Report(boolean healthy,int capacity,int connections,Set<String> activeRooms,long checkedAt,String network,boolean federationReady,Set<String> federationPeers) {
+        Report(boolean healthy,int capacity,int connections,Set<String> activeRooms,long checkedAt) {
+            this(healthy,capacity,connections,activeRooms,checkedAt,"",false,Set.of());
+        }
         Report {
             if(capacity<1 || capacity>RelayServer.MAX_SESSIONS || connections<0 || connections>capacity || activeRooms.size()>RelayServer.MAX_SESSIONS)
                 throw new IllegalArgumentException("Invalid node report");
             activeRooms=Set.copyOf(activeRooms);
             if(activeRooms.stream().anyMatch(room -> !room.matches("[a-f0-9]{64}")))
                 throw new IllegalArgumentException("Invalid active room");
+            if(network==null || !network.isEmpty() && !network.matches("[a-z0-9_-]{1,64}") || federationReady && network.isEmpty())
+                throw new IllegalArgumentException("Invalid federation report");
+            federationPeers=Set.copyOf(federationPeers);
+            if(federationPeers.size()>=Federation.MAX_NODES || federationPeers.stream().anyMatch(node -> !node.matches("[a-z0-9_-]{1,32}")))
+                throw new IllegalArgumentException("Invalid federation peers");
         }
     }
     private record Assignment(String node,long lastSeen,long reservedUntil,boolean observed) {}
@@ -120,7 +128,7 @@ final class RoutingDirectory implements DirectoryRoutes {
                 && allReportsFresh(now) && !active(room,now)) {
             // Public lookups cannot keep an unused reservation alive indefinitely. Honor the
             // last durable lease before safely reallocating; only node reports prove activity.
-            if(now<previous.reservedUntil)return response(node,nodes.values(),previous.reservedUntil);
+            if(now<previous.reservedUntil)return candidates(response(node,nodes.values(),previous.reservedUntil),node,now);
             previous=null; node=null;
         }
         if(node==null) {
@@ -143,7 +151,32 @@ final class RoutingDirectory implements DirectoryRoutes {
             // Only advertise what is already durable if the process restarts immediately after this response.
             next=new Assignment(node.id,seen,previous.reservedUntil,observed); assignments.put(room,next);
         }
-        return response(node,nodes.values(),next.reservedUntil);
+        return candidates(response(node,nodes.values(),next.reservedUntil),node,now);
+    }
+    private JsonObject candidates(JsonObject response,Node assigned,long now) {
+        Report home=reports.get(assigned.id);
+        // Legacy clients retain room affinity. New clients may choose only peers of the same ready mesh.
+        if(!monitored || home==null || home.network.isEmpty())return response;
+        if(nodes.values().stream().anyMatch(node -> {
+            Report report=reports.get(node.id);
+            return node.enabled && fresh(report,now) && report.healthy && !home.network.equals(report.network);
+        }))return response;
+        Set<String> required=new HashSet<>();
+        nodes.values().forEach(node -> {
+            Report report=reports.get(node.id);
+            if(node.enabled && fresh(report,now) && report.healthy && home.network.equals(report.network))required.add(node.id);
+        });
+        JsonArray choices=new JsonArray();
+        nodes.values().stream().sorted(Comparator.comparing(Node::id)).forEach(node -> {
+            Report report=reports.get(node.id);
+            if(!node.enabled || !fresh(report,now) || !report.healthy
+                    || !home.network.equals(report.network) || report.connections>=report.capacity)return;
+            if(required.stream().anyMatch(id -> !id.equals(node.id) && !report.federationPeers.contains(id)))return;
+            JsonObject value=new JsonObject();value.addProperty("id",node.id);value.addProperty("control",node.control.toString());
+            value.addProperty("udpPort",node.udpPort);choices.add(value);
+        });
+        if(!choices.isEmpty()) { response.addProperty("federation",1);response.add("nodes",choices); }
+        return response;
     }
     static JsonObject response(Node node,Collection<Node> nodes,long validUntil) {
         JsonObject j=new JsonObject(); j.addProperty("protocol",1); j.addProperty("node",node.id);

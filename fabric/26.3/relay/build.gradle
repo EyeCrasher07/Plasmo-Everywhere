@@ -32,6 +32,12 @@ tasks.register('verifyFederation', JavaExec) {
     mainClass = 'dev.eyecrasher.everywhere.relay.FederationTest'
 }
 check.dependsOn verifyFederation
+tasks.register('verifyAutomaticPresence', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.eyecrasher.everywhere.relay.AutomaticPresenceTest'
+}
+check.dependsOn verifyAutomaticPresence
 tasks.register('verifyUsage', JavaExec) {
     dependsOn testClasses
     classpath = sourceSets.test.runtimeClasspath

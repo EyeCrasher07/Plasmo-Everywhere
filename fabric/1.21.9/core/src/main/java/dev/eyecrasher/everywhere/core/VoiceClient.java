@@ -77,6 +77,9 @@ public final class VoiceClient implements AutoCloseable, WebSocket.Listener {
     private volatile RouterMapper router;
     private ScheduledExecutorService discoveryClock;
     private boolean transportExtension;
+    private volatile boolean presenceExtension;
+    private WorldPresence.Snapshot presence,lastPublishedPresence;
+    private long lastPresencePublished;
     private long lastLan,lastTcpDiscovery;
     private boolean reportedSharedPortUnavailable;
     private final AtomicLong directUdpVoice=new AtomicLong(),directTcpVoice=new AtomicLong(),relayedVoice=new AtomicLong();
@@ -244,16 +247,28 @@ public final class VoiceClient implements AutoCloseable, WebSocket.Listener {
                 routerStats==null?0:routerStats.gateways(),routerStats==null?0:routerStats.udpMappings(),routerStats==null?0:routerStats.tcpMappings(),
                 routerStats==null?"":routerStats.methods(),routerStats==null?0:routerStats.failures(),currentLan==null?"unavailable":currentLan.diagnostics());
     }
-    public void nearby(Set<UUID> players) {
+    public void nearby(Set<UUID> players) { nearby(players,null); }
+    public void nearby(Set<UUID> players,WorldPresence.Snapshot observations) {
         if (players.size() > 24) throw new IllegalArgumentException("Nearby limit");
         Set<UUID> next = Set.copyOf(players);
-        if (next.equals(nearby)) return;
-        nearby = next;
+        if(observations!=null && (!observations.player().equals(identity.player) || !observations.dimension().equals(identity.dimension)
+                || !observations.nearby().keySet().equals(next)))throw new IllegalArgumentException("Presence identity");
+        boolean publish;
+        synchronized(this) {
+            boolean changed=!next.equals(nearby),withdrawn=presence!=null && observations==null;
+            presence=observations;nearby=next;
+            long age=System.nanoTime()-lastPresencePublished;
+            boolean refresh=presenceExtension && observations!=null && (lastPublishedPresence==null
+                    || age>=TimeUnit.SECONDS.toNanos(3) || age>=TimeUnit.SECONDS.toNanos(1) && !observations.samePositions(lastPublishedPresence));
+            publish=ready && (changed || withdrawn || refresh);
+        }
         for(Peer peer:peers.values())if(!next.contains(peer.player))synchronized(peer) { peer.pending.clear(); }
-        if (ready) publishNearby();
+        if(publish)publishNearby();
     }
-    private void publishNearby() {
-        JsonObject j = Wire.message("nearby"); JsonArray ids = new JsonArray(); nearby.forEach(id -> ids.add(id.toString())); j.add("players", ids); send(j);
+    private synchronized void publishNearby() {
+        JsonObject j = Wire.message("nearby"); JsonArray ids = new JsonArray(); nearby.forEach(id -> ids.add(id.toString())); j.add("players", ids);
+        if(presenceExtension && presence!=null && !nearby.isEmpty())j.add("presence",WorldPresence.write(presence));
+        lastPublishedPresence=presence;lastPresencePublished=System.nanoTime();send(j);
     }
     public void sendAudio(Set<UUID> recipients, long audioSequence, int distance, byte[] opus, boolean end) {
         if (!isReady() || opus.length > 800 || distance < 1 || distance > 32) return;
@@ -360,6 +375,7 @@ public final class VoiceClient implements AutoCloseable, WebSocket.Listener {
                 trace.recordForAttempt(traceAttempt, "WELCOME", verified ? "VERIFIED" : "UNVERIFIED", elapsed(connectStarted), null, -1);
                 candidateExtension = j.has("candidates") && j.get("candidates").getAsBoolean();
                 transportExtension=automaticRoutes && j.has("transports") && j.get("transports").getAsInt()==1;
+                presenceExtension=j.has("presence") && j.get("presence").getAsInt()==1;
                 if (candidateExtension && directEnabled && udp != null) prepareDiscovery();
                 resumption = new Resumption(session, identity, udpKey);
                 if(directEnabled && transportExtension)startTransports();

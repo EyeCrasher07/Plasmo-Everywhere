@@ -45,12 +45,15 @@ final class Federation implements AutoCloseable {
         }
         @Override public String toString() { return "Federation.Config[node="+node+", peers="+peers.size()+"]"; }
     }
-    private record Link(String node,WebSocket socket) {}
+    private record Link(String node,WebSocket socket,long openedAt) {
+        Link(String node,WebSocket socket) { this(node,socket,System.nanoTime()); }
+    }
     private final RelayServer relay;
     final Config config;
     private final Map<String,Link> links=new ConcurrentHashMap<>();
     private final Map<WebSocket,Link> incoming=new ConcurrentHashMap<>();
     private final Map<String,WebSocketClient> outbound=new ConcurrentHashMap<>();
+    private final Map<String,Long> outboundStarted=new ConcurrentHashMap<>();
     private final Set<String> synchronizedNodes=ConcurrentHashMap.newKeySet();
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,r -> {
         Thread t=new Thread(r,"everywhere-federation");t.setDaemon(true);return t;
@@ -60,14 +63,25 @@ final class Federation implements AutoCloseable {
 
     Federation(RelayServer relay,Config config) {
         this.relay=relay;this.config=config;worker.setRemoveOnCancelPolicy(true);
-        worker.scheduleWithFixedDelay(this::connect,0,2,TimeUnit.SECONDS);
+        worker.scheduleWithFixedDelay(() -> {
+            try { connect(); }
+            catch(RuntimeException unavailable) { /* A failed dial must not cancel all future retries. */ }
+        },0,2,TimeUnit.SECONDS);
     }
     private void connect() {
         if(closed || relay.getPort()<1)return;
         for(var peer:config.peers.entrySet()) {
-            if(config.node.compareTo(peer.getKey())>=0 || links.containsKey(peer.getKey()))continue;
+            long now=System.nanoTime();Link link=links.get(peer.getKey());
+            if(link!=null) {
+                if(link.socket.isOpen() && (synchronizedNodes.contains(peer.getKey()) || now-link.openedAt<TimeUnit.SECONDS.toNanos(10)))continue;
+                disconnected(peer.getKey(),link.socket);link.socket.closeConnection(1001,"Federation synchronization timed out");
+            }
+            if(config.node.compareTo(peer.getKey())>=0)continue;
             WebSocketClient previous=outbound.get(peer.getKey());
-            if(previous!=null && !previous.isClosed())continue;
+            if(previous!=null && !previous.isClosed()) {
+                if(now-outboundStarted.getOrDefault(peer.getKey(),now)<TimeUnit.SECONDS.toNanos(10))continue;
+                previous.closeConnection(1001,"Federation connection timed out");
+            }
             String id=peer.getKey();
             WebSocketClient client=new WebSocketClient(peer.getValue(),new BoundedRelayDraft(),
                     Map.of("Authorization","Bearer "+config.key,"X-Everywhere-Node",config.node,"X-Everywhere-Network",config.network),3000) {
@@ -77,7 +91,7 @@ final class Federation implements AutoCloseable {
                 @Override public void onClose(int code,String reason,boolean remote) { disconnected(id,getConnection()); }
                 @Override public void onError(Exception error) { /* Reconnect without logging credentials or endpoints. */ }
             };
-            client.setConnectionLostTimeout(5);client.setDaemon(true);outbound.put(id,client);client.connect();
+            client.setConnectionLostTimeout(5);client.setDaemon(true);outbound.put(id,client);outboundStarted.put(id,now);client.connect();
         }
     }
     boolean accept(WebSocket socket,ClientHandshake handshake) {

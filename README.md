@@ -14,7 +14,7 @@ Java **17+** is required through Minecraft 1.20.4, **21+** for 1.20.5–1.21.11,
 
 Put the Plasmo Everywhere JAR and its dependencies in your `mods` folder. Everyone you want to talk to needs the addon and Plasmo Voice installed.
 
-Join the same Minecraft server using the same server address. Voice connects automatically. Use the normal Plasmo Voice controls for your microphone, push-to-talk and volume. Open **Esc → Everywhere** to check the connection or reconnect.
+Join the same Minecraft server. Voice connects automatically, including nearby player discovery across different server addresses when both players use beta.3 or newer. Use the normal Plasmo Voice controls for your microphone, push-to-talk and volume. Open **Esc → Everywhere** to check the connection or reconnect.
 
 The addon automatically selects a low-latency relay. Players connected through different project relays can still talk together. It tries to connect players directly and uses a relay when a direct connection is unavailable. Servers with their own Plasmo Voice setup take priority automatically.
 

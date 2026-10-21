@@ -7,6 +7,7 @@ import java.util.concurrent.*;
 import java.util.function.BooleanSupplier;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
+import org.java_websocket.handshake.ClientHandshake;
 
 /** Actual sockets and encrypted clients on three independent localhost relays. */
 public final class FederationTest {
@@ -70,7 +71,9 @@ public final class FederationTest {
                 if(sc.audio.poll(100,TimeUnit.MILLISECONDS)!=null || sd.audio.poll(100,TimeUnit.MILLISECONDS)!=null)
                     throw new AssertionError("Cross-room audio leaked");
                 long forwarded=Arrays.stream(cluster.nodes).mapToLong(node -> node.health().getAsJsonObject("federation").get("sentFrames").getAsLong()).sum();
-                if(direct && forwarded!=0)throw new AssertionError("P2P audio unnecessarily crossed VPS links");
+                // UDP speech uses P2P; its reliable end marker may still use the control connection.
+                if(direct && (a.networkStats().relayedVoicePackets()!=0 || b.networkStats().relayedVoicePackets()!=0 || forwarded>1))
+                    throw new AssertionError("P2P audio unnecessarily crossed VPS links");
                 if(!direct && forwarded<2)throw new AssertionError("Fallback bypassed tested inter-node forwarding");
                 b.nearby(Set.of());await(() -> a.peers().isEmpty(),"withdraw remote proximity");
                 b.nearby(Set.of(Wire.offlineUuid("FederationA")));await(() -> a.peers().size()==1,"restore remote proximity");
@@ -89,7 +92,12 @@ public final class FederationTest {
                 cluster.nodes[1]=replacement;
                 replacement.enableFederation(new Federation.Config("local-test","node1",cluster.key,
                         Map.of("node0",cluster.uri(0,"/federation"),"node2",cluster.uri(2,"/federation"))));replacement.start();
-                await(() -> Arrays.stream(cluster.nodes).allMatch(node -> node.health().getAsJsonObject("federation").get("ready").getAsBoolean()),"mesh recovers after restart");
+                try {
+                    await(() -> Arrays.stream(cluster.nodes).allMatch(node -> node.health().getAsJsonObject("federation").get("ready").getAsBoolean()),"mesh recovers after restart");
+                } catch(AssertionError failure) {
+                    for(int n=0;n<cluster.nodes.length;n++)System.err.println("Recovery node "+n+": "+cluster.nodes[n].health());
+                    throw failure;
+                }
                 Sink recovered=new Sink();
                 try(VoiceClient afterRestart=client(cluster,1,"FederationB",direct,udp,recovered,ROOM,DIMENSION)) {
                     afterRestart.connect().get(5,TimeUnit.SECONDS);afterRestart.nearby(Set.of(Wire.offlineUuid("FederationA")));
@@ -103,10 +111,33 @@ public final class FederationTest {
     public static void main(String[] args) throws Exception {
         pair(false,false,false);pair(false,true,true);pair(true,true,false);
         identityPriority();
+        stalledSynchronization();
         RegionalDirectoryTest.verify();
         try { new Federation.Config("test","a","0".repeat(64),Map.of("b",URI.create("ws://example.com/federation")));throw new AssertionError("Public plaintext allowed"); }
         catch(IllegalArgumentException expected) {}
         System.out.println("Federation integration checks passed");
+    }
+    private static void stalledSynchronization() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger connections=new java.util.concurrent.atomic.AtomicInteger();
+        RelayServer node=new RelayServer("127.0.0.1",0,0,null);
+        var peer=new org.java_websocket.server.WebSocketServer(new java.net.InetSocketAddress("127.0.0.1",0)) {
+            @Override public void onOpen(org.java_websocket.WebSocket socket,ClientHandshake handshake) {
+                if(connections.incrementAndGet()>1)socket.send(Wire.GSON.toJson(Wire.message("sync")));
+            }
+            @Override public void onClose(org.java_websocket.WebSocket socket,int code,String reason,boolean remote) {}
+            @Override public void onMessage(org.java_websocket.WebSocket socket,String text) {}
+            @Override public void onError(org.java_websocket.WebSocket socket,Exception error) {}
+            @Override public void onStart() {}
+        };
+        try {
+            node.start();peer.start();await(() -> node.getPort()>0 && peer.getPort()>0,"Stalled-sync fixture starts");
+            String key=HexFormat.of().formatHex(Wire.random(32));
+            node.enableFederation(new Federation.Config("stalled-test","a",key,Map.of("b",URI.create("ws://127.0.0.1:"+peer.getPort()+"/federation"))));
+            await(() -> connections.get()>0,"Intentionally stalled first synchronization");
+            if(node.health().getAsJsonObject("federation").get("ready").getAsBoolean())throw new AssertionError("Missing synchronization reported ready");
+            await(() -> connections.get()>=2 && node.health().getAsJsonObject("federation").get("ready").getAsBoolean(),"Stalled open link automatically reconnects");
+            System.out.println("Federation synchronization deadline passed: an open unsynchronized connection recovers automatically");
+        } finally { node.close();peer.stop(1000); }
     }
     private static void identityPriority() throws Exception {
         try(Cluster cluster=new Cluster(true)) {

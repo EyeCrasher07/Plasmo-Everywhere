@@ -7,7 +7,7 @@
     "VoiceClientMixin",
     "CaptureMixin",
     "NativeChannelMixin",
-    "MinecraftWorldMixin"
+    "MinecraftWorldMixin", "WorldSeedAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

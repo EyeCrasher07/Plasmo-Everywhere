@@ -4,6 +4,6 @@
   "package": "dev.eyecrasher.everywhere.forge.mixin",
   "compatibilityLevel": "JAVA_17",
   "refmap": "plasmo_everywhere.refmap.json",
-  "client": ["VoiceClientMixin", "CaptureMixin", "NativeChannelMixin", "MinecraftWorldMixin"],
+  "client": ["VoiceClientMixin", "CaptureMixin", "NativeChannelMixin", "MinecraftWorldMixin", "WorldSeedAccessor"],
   "injectors": { "defaultRequire": 1 }
 }

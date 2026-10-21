@@ -183,7 +183,7 @@ public final class EverywhereMod {
         local.stream().limit(24).forEach(p -> snapshot.put(p.getUUID(), Math.sqrt(p.distanceToSqr(mc.player))));
         boolean resuming = !worldAudioAllowed;
         distances = Map.copyOf(snapshot);
-        if (resuming || ticks % 10 == 0) transport.nearby(snapshot.keySet());
+        if (resuming || ticks % 10 == 0) transport.nearby(snapshot.keySet(),capturePresence(mc,snapshot.keySet()));
         if (resuming) {
             peers = transport.peers(); audioSessions.update(peers); bridge.updatePlayers(peers); worldAudioAllowed = true; state = State.CONNECTED;
         }
@@ -200,6 +200,17 @@ public final class EverywhereMod {
         if (ticks >= nextDiagnosticsTick && !peers.isEmpty()) {
             nextDiagnosticsTick=ticks+1200; diagnostics(false);
         }
+    }
+    private static WorldPresence.Snapshot capturePresence(Minecraft mc,Set<UUID> visible) {
+        if(visible.isEmpty())return null;
+        String dimension=mc.level.dimension().toString();
+        long seed=((dev.eyecrasher.everywhere.forge.mixin.WorldSeedAccessor)mc.level.getBiomeManager()).everywhere$biomeSeed();
+        Map<UUID,WorldPresence.Point> observations=new HashMap<>();
+        for(var player:mc.level.players())if(visible.contains(player.getUUID()))
+            observations.put(player.getUUID(),new WorldPresence.Point(player.getId(),player.getX(),player.getY(),player.getZ()));
+        var player=mc.player;
+        return new WorldPresence.Snapshot(player.getUUID(),dimension,WorldPresence.fingerprint(seed,dimension),Math.max(0,mc.level.getGameTime()),
+                new WorldPresence.Point(player.getId(),player.getX(),player.getY(),player.getZ()),observations);
     }
     private static SessionScope captureScope(Minecraft mc) throws Exception {
         ServerAddress address = ServerAddress.parseString(mc.getCurrentServer().ip);

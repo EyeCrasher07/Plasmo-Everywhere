@@ -5,6 +5,7 @@ import java.util.*;
 
 public final class ProtocolTest {
     public static void main(String[] args) throws Exception {
+        WorldPresenceTest.run();
         UUID a = UUID.randomUUID(), b = UUID.randomUUID(), outsider = UUID.randomUUID();
         KeyPair ka = PeerCrypto.keyPair(), kb = PeerCrypto.keyPair();
         PeerCrypto alice = new PeerCrypto(ka, a, b, kb.getPublic().getEncoded());
